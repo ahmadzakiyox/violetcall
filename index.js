@@ -5,13 +5,12 @@ const { Telegraf } = require("telegraf");
 const bodyParser = require("body-parser");
 require("dotenv").config();
 
-// --- Import Models (Untuk Bot Auto-Payment Baru) ---
+// --- Import Models ---
 const User = require('./models/User'); 
 const Product = require('./models/Product'); 
 const Transaction = require('./models/Transaction'); 
 
 const app = express();
-// Gunakan port dari env, default 37763
 const PORT = process.env.PAYMENT_CALLBACK_PORT || 37763; 
 
 app.use(bodyParser.urlencoded({ extended: true })); 
@@ -77,7 +76,8 @@ async function processNewBotTransaction(refId, data) {
         let totalBayarCallback = 0;
         
         for (const key of nominalKeys) {
-            if (data[key]) {
+            // Memastikan data[key] ada dan bukan string kosong sebelum diparse
+            if (data[key] !== undefined && data[key] !== null && String(data[key]).trim() !== "") {
                 const parsedValue = parseFloat(data[key]);
                 if (parsedValue > 0) {
                     totalBayarCallback = parsedValue;
