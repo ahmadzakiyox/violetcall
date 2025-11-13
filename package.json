@@ -1,0 +1,32 @@
+{
+  "name": "spybot-premium-server",
+  "version": "1.0.0",
+  "description": "Telegram Bot dan Callback Server untuk sistem pelacakan premium.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [
+    "telegram-bot",
+    "telegraf",
+    "mongoose",
+    "payment-gateway",
+    "express"
+  ],
+  "author": "Ahmadzaki",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.2",
+    "crypto": "^1.0.1",
+    "body-parser": "^2.2.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "mongoose": "^8.0.3",
+    "node-fetch": "^2.6.1",
+    "telegraf": "^4.15.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
