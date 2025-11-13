@@ -12,8 +12,9 @@ const Product = require('./models/Product');
 const Transaction = require('./models/Transaction'); 
 
 const app = express();
-// Gunakan port dari env, default 37763
-const PORT = process.env.PAYMENT_CALLBACK_PORT || 37763; 
+
+// PERBAIKAN: Gunakan process.env.PORT standar Heroku jika tersedia, lalu fallback ke env custom/default
+const PORT = process.env.PORT || process.env.PAYMENT_CALLBACK_PORT || 3000; 
 
 app.use(bodyParser.urlencoded({ extended: true })); 
 app.use(bodyParser.json()); 
@@ -22,11 +23,6 @@ app.use(bodyParser.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
-
-// ====== KONEKSI DATABASE ======
-mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ Payment Callback Server: MongoDB Connected"))
-  .catch(err => console.error("❌ Payment Callback Server: MongoDB Error:", err));
 
 // Inisialisasi Bot untuk mengirim notifikasi
 const bot = new Telegraf(BOT_TOKEN); 
@@ -221,7 +217,18 @@ app.post("/payment_callback", async (req, res) => {
 });
 
 
-// ====== SERVER LAUNCH ======
-app.listen(PORT, () => {
-    console.log(`🚀 Payment Callback server berjalan di port ${PORT}`);
-});
+// ====== PERBAIKAN: KONEKSI DATABASE & SERVER LAUNCH ======
+// Server harus dijalankan HANYA SETELAH koneksi database berhasil.
+mongoose.connect(MONGO_URI)
+  .then(() => {
+    console.log("✅ Payment Callback Server: MongoDB Connected");
+    
+    app.listen(PORT, () => {
+        console.log(`🚀 Payment Callback server berjalan di port ${PORT}`);
+    });
+  })
+  .catch(err => {
+      console.error("❌ Payment Callback Server: MongoDB Error:", err);
+      // PENTING: Matikan proses jika koneksi DB gagal agar Heroku bisa me-restart
+      process.exit(1); 
+  });
