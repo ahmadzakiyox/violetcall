@@ -11,7 +11,7 @@ const Product = require('./models/Product');
 const Transaction = require('./models/Transaction'); 
 
 const app = express();
-// Gunakan port yang berbeda dari bot utama, misalnya 37763
+// Gunakan port dari env, default 37763
 const PORT = process.env.PAYMENT_CALLBACK_PORT || 37763; 
 
 app.use(bodyParser.urlencoded({ extended: true })); 
@@ -71,9 +71,23 @@ async function processNewBotTransaction(refId, data) {
     try {
         const status = data.status.toLowerCase(); 
         
-        // Mengambil nominal secara fleksibel
-        const callbackNominalKey = data.total || data.nominal || data.jumlah;
-        const totalBayarCallback = parseFloat(callbackNominalKey || 0);
+        // Perbaikan: Mencoba semua key nominal yang mungkin
+        const nominalKeys = ['total', 'nominal', 'jumlah', 'amount', 'total_amount', 'paid_amount', 'refNominal', 'harga_bayar'];
+        
+        let totalBayarCallback = 0;
+        
+        for (const key of nominalKeys) {
+            if (data[key]) {
+                const parsedValue = parseFloat(data[key]);
+                if (parsedValue > 0) {
+                    totalBayarCallback = parsedValue;
+                    console.log(`✅ [PAYMENT BOT] Nominal ditemukan di key: ${key} dengan nilai: ${totalBayarCallback}`);
+                    break;
+                }
+            }
+        }
+        
+        console.log(`--- Nominal Callback Final: ${totalBayarCallback} ---`);
         
         const transaction = await TransactionNew.findOne({ refId: refId });
 
@@ -94,9 +108,9 @@ async function processNewBotTransaction(refId, data) {
             
             // 2. Pastikan jumlah pembayaran sesuai
             if (totalBayarCallback !== transaction.totalBayar) {
-                console.log(`⚠️ [PAYMENT BOT] Jumlah pembayaran tidak sesuai. DB: ${transaction.totalBayar}, Callback: ${totalBayarCallback}.`);
+                console.log(`⚠️ [PAYMENT BOT] Jumlah pembayaran TIDAK SESUAI. DB: ${transaction.totalBayar}, Callback: ${totalBayarCallback}.`);
                 await TransactionNew.updateOne({ refId }, { status: 'FAILED' });
-                bot.telegram.sendMessage(userId, `❌ **Pembayaran Gagal:** Jumlah yang dibayarkan tidak sesuai (Ref: ${refId}).`, { parse_mode: 'Markdown' });
+                bot.telegram.sendMessage(userId, `❌ **Pembayaran Gagal:** Nominal tidak sesuai (DB: ${transaction.totalBayar}, Callback: ${totalBayarCallback}). Hubungi Admin. (Ref: ${refId}).`, { parse_mode: 'Markdown' });
                 return;
             }
 
@@ -142,8 +156,7 @@ async function processNewBotTransaction(refId, data) {
 
 // FUNGSI UTAMA UNTUK VERIFIKASI SIGNATURE
 function verifySignature(refid, data) {
-    const nominal = data.total || data.nominal || '0';
-    const calculatedSignature = crypto.createHash('md5').update(VIOLET_SECRET_KEY + refid).digest('hex'); 
+    const calculatedSignature = crypto.createHash('md5').update(process.env.VIOLET_SECRET_KEY + refid).digest('hex'); 
     const incomingSignature = data.signature;
 
     const isSignatureValid = (incomingSignature === calculatedSignature);
@@ -158,7 +171,6 @@ function verifySignature(refid, data) {
 
 
 // ====== ENDPOINT UTAMA KHUSUS PAYMENT ======
-// Gunakan endpoint sederhana /callback atau /payment_callback
 app.post("/payment_callback", async (req, res) => {
     
     const data = req.body; 
