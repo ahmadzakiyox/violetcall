@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const mongoose = require("mongoose");
 const { Telegraf } = require("telegraf"); 
 const bodyParser = require("body-parser");
+const fetch = require('node-fetch'); // Digunakan untuk logging eksternal
 require("dotenv").config();
 
 // --- Import Models ---
@@ -11,6 +12,7 @@ const Product = require('./models/Product');
 const Transaction = require('./models/Transaction'); 
 
 const app = express();
+// Gunakan port dari env, default 37763
 const PORT = process.env.PAYMENT_CALLBACK_PORT || 37763; 
 
 app.use(bodyParser.urlencoded({ extended: true })); 
@@ -70,13 +72,12 @@ async function processNewBotTransaction(refId, data) {
     try {
         const status = data.status.toLowerCase(); 
         
-        // Perbaikan: Mencoba semua key nominal yang mungkin
+        // Logika fleksibel mencari nominal dari berbagai key
         const nominalKeys = ['total', 'nominal', 'jumlah', 'amount', 'total_amount', 'paid_amount', 'refNominal', 'harga_bayar'];
         
         let totalBayarCallback = 0;
         
         for (const key of nominalKeys) {
-            // Memastikan data[key] ada dan bukan string kosong sebelum diparse
             if (data[key] !== undefined && data[key] !== null && String(data[key]).trim() !== "") {
                 const parsedValue = parseFloat(data[key]);
                 if (parsedValue > 0) {
@@ -174,6 +175,25 @@ function verifySignature(refid, data) {
 app.post("/payment_callback", async (req, res) => {
     
     const data = req.body; 
+    
+    // ==========================================================
+    // >>> LANGKAH DEBUGGING EKSTERNAL (HAPUS SETELAH SELESAI) <<<
+    // GANTI URL INI DENGAN ENDPOINT LOGGING TEMPORER ANDA!
+    const EXTERNAL_LOGGING_URL = 'URL_LOGGING_EKSTERNAL_ANDA_DI_SINI'; 
+    
+    if (EXTERNAL_LOGGING_URL.startsWith('http')) {
+        try {
+            fetch(EXTERNAL_LOGGING_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            }).catch(e => console.error('Failed to log externally:', e));
+        } catch (e) {
+             // Abaikan error di sini
+        }
+    }
+    // ==========================================================
+    
     const refid = data.ref_id || data.ref_kode || data.ref; 
     
     console.log(`\n--- CALLBACK DITERIMA (PAYMENT BOT) ---`);
