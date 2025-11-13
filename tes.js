@@ -3,11 +3,12 @@ const bodyParser = require('body-parser');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { Telegraf } = require('telegraf'); 
+const { URLSearchParams } = require('url'); // Diperlukan untuk parsing body raw
 
-// Pastikan file .env dimuat
 require('dotenv').config();
 
-// --- Import Models (Pastikan jalur sesuai jika server terpisah) ---
+// --- Import Models ---
+// Pastikan folder 'models' ada dan berisi User.js, Product.js, Transaction.js
 const User = require('./models/User'); 
 const Product = require('./models/Product'); 
 const Transaction = require('./models/Transaction'); 
@@ -15,9 +16,16 @@ const Transaction = require('./models/Transaction');
 // --- Konfigurasi dari .env ---
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
-const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
+// VIOLET_API_KEY diperlukan untuk verifikasi signature: refId + API_KEY + nominal
+const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
+// Gunakan port khusus untuk callback server
 const CALLBACK_PORT = process.env.CALLBACK_PORT || 3001; 
+
+if (!BOT_TOKEN || !MONGO_URI || !VIOLET_API_KEY || !VIOLET_SECRET_KEY) {
+    console.error("❌ ERROR: Pastikan BOT_TOKEN, MONGO_URI, VIOLET_API_KEY, dan VIOLET_SECRET_KEY terisi di .env");
+    process.exit(1);
+}
 
 // --- Inisialisasi Bot (Hanya untuk mengirim notifikasi) ---
 const bot = new Telegraf(BOT_TOKEN);
@@ -32,17 +40,19 @@ mongoose.connect(MONGO_URI)
 
 // --- Inisialisasi Express App ---
 const app = express();
-// Gunakan raw body parser untuk /webhook/violetpay agar bisa memverifikasi signature
+// Gunakan raw body parser HANYA untuk endpoint callback, karena VMP mengirim body x-www-form-urlencoded
 app.use('/webhook/violetpay', bodyParser.raw({ type: 'application/x-www-form-urlencoded' }));
-// Gunakan json parser untuk semua rute lain (jika ada)
 app.use(bodyParser.json()); 
 
 
 // ====================================================
-// ====== UTILITY FUNCTIONS (Disalin dari t.js) =======
+// ====== UTILITY FUNCTIONS (Delivery Logic) ======
 // ====================================================
 
-// Fungsi pengiriman produk (Disalin dari t.js)
+/**
+ * Mengirim konten produk ke pengguna, mengurangi stok, dan menambah totalTerjual.
+ * Fungsi ini disalin dari logic bot Anda.
+ */
 async function deliverProduct(userId, productId) {
     const product = await Product.findById(productId);
     
@@ -81,26 +91,27 @@ app.post('/webhook/violetpay', async (req, res) => {
 
     console.log('[VMP CALLBACK RECEIVED]', callbackData);
 
+    const refId = callbackData.ref_kode; // VMP menggunakan ref_kode
+    const amount = parseInt(callbackData.nominal);
+    const vmpStatus = callbackData.status;
+    const incomingSignature = callbackData.signature;
+
     // Pastikan data penting ada
-    if (!callbackData.ref_kode || !callbackData.nominal || !callbackData.signature || !callbackData.status) {
-        console.warn('❌ [VMP WARN] Missing required fields');
+    if (!refId || !amount || !incomingSignature || !vmpStatus) {
+        console.warn('❌ [VMP WARN] Missing required fields (ref_kode, nominal, status, or signature)');
         return res.status(400).send('Missing required fields'); 
     }
     
-    const refId = callbackData.ref_kode;
-    const amount = parseInt(callbackData.nominal);
-    const vmpStatus = callbackData.status;
-
     // 1. Verifikasi Signature VMP (Kritis!)
-    // Formula Signature: refId + API_KEY + nominal
+    // Signature Formula: refId + API_KEY + nominal (Sesuai dengan logic request di t.js)
     const mySignatureString = refId + VIOLET_API_KEY + amount;
     const calculatedSignature = crypto
         .createHmac("sha256", VIOLET_SECRET_KEY)
         .update(mySignatureString)
         .digest("hex");
 
-    if (calculatedSignature !== callbackData.signature) {
-        console.warn(`❌ [VMP WARN] Signature tidak cocok untuk Ref ID: ${refId}. Ditolak.`);
+    if (calculatedSignature !== incomingSignature) {
+        console.warn(`❌ [VMP WARN] Signature tidak cocok untuk Ref ID: ${refId}. Ditolak. Dikirim: ${incomingSignature}, Hitungan: ${calculatedSignature}`);
         // Selalu kirim 200 agar VMP menghentikan retry
         return res.status(200).send('Signature Mismatch but OK to stop retry'); 
     }
@@ -119,39 +130,40 @@ app.post('/webhook/violetpay', async (req, res) => {
                 console.log(`ℹ️ [VMP INFO] Transaksi sudah diproses: ${refId}.`);
                 return res.status(200).send('Transaction already processed');
             }
+            
+            // Verifikasi Nominal (opsional tapi disarankan)
+            if (transaction.totalBayar !== amount) {
+                console.warn(`⚠️ [VMP WARN] Nominal tidak sesuai. DB: ${transaction.totalBayar}, Callback: ${amount}. Ref ID: ${refId}.`);
+                return res.status(200).send('Nominal mismatch');
+            }
 
-            // Update status transaksi
+            // A. Update status transaksi
             await Transaction.updateOne({ refId: refId }, { status: 'SUCCESS' });
             
-            // Cari User
-            const user = await User.findOne({ userId: transaction.userId });
-            if (!user) {
-                 console.error(`❌ [VMP ERROR] User tidak ditemukan untuk Transaksi ${refId}.`);
-                 return res.status(200).send('User not found'); 
-            }
-            
+            // B. Cari User
+            const userId = transaction.userId;
+            const user = await User.findOne({ userId });
             const itemType = transaction.produkInfo.type;
             
-            // Lakukan Delivery (Produk atau Saldo)
+            // C. Lakukan Delivery (Produk atau Saldo)
             if (itemType === 'TOPUP') {
                 // Tambah saldo pengguna & update total transaksi
-                user.saldo += transaction.totalBayar;
-                user.totalTransaksi += 1;
-                await user.save();
+                await User.updateOne({ userId }, { $inc: { saldo: transaction.totalBayar, totalTransaksi: 1 } });
+                const updatedUser = await User.findOne({ userId }); // Ambil data user terbaru untuk notifikasi
                 
-                bot.telegram.sendMessage(user.userId, 
+                bot.telegram.sendMessage(userId, 
                     `🎉 **Top Up Saldo Berhasil!**\n` +
                     `Saldo Anda bertambah **Rp ${transaction.totalBayar.toLocaleString('id-ID')}**.\n` +
-                    `Saldo kini: Rp ${user.saldo.toLocaleString('id-ID')}.`, 
+                    `Saldo kini: Rp ${updatedUser.saldo.toLocaleString('id-ID')}.`, 
                     { parse_mode: 'Markdown' }
                 );
                 
             } else if (itemType === 'PRODUCT') {
                 const product = await Product.findOne({ namaProduk: transaction.produkInfo.namaProduk });
                 if (product) {
-                    await deliverProduct(user.userId, product._id); 
+                    await deliverProduct(userId, product._id); 
                     // Update total transaksi user
-                    await User.updateOne({ userId: user.userId }, { $inc: { totalTransaksi: 1 } });
+                    await User.updateOne({ userId }, { $inc: { totalTransaksi: 1 } });
                 }
             }
             
@@ -159,6 +171,7 @@ app.post('/webhook/violetpay', async (req, res) => {
             
         } catch (error) {
             console.error(`❌ [VMP ERROR] Gagal memproses transaksi ${refId}:`, error);
+            // Tetap kirim 200, penanganan kegagalan harus dilakukan secara manual/monitoring
             return res.status(200).send('Internal Server Error'); 
         }
         
@@ -175,7 +188,7 @@ app.post('/webhook/violetpay', async (req, res) => {
         }
     }
     
-    // Wajib mengembalikan 200 OK ke VMP
+    // Wajib mengembalikan 200 OK ke VMP agar tidak retry
     res.status(200).send('OK'); 
 });
 
@@ -190,5 +203,5 @@ app.get('/success', (req, res) => {
 // ====================================================
 
 app.listen(CALLBACK_PORT, () => {
-    console.log(`🌐 VMP Callback Server berjalan di port ${CALLBACK_PORT}`);
+    console.log(`🚀 VMP Callback Server berjalan di port ${CALLBACK_PORT}`);
 });
