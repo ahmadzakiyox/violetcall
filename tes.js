@@ -20,7 +20,7 @@ const MONGO_URI = process.env.MONGO_URI;
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 // Gunakan port khusus untuk callback server
-const CALLBACK_PORT = process.env.CALLBACK_PORT || 3001; 
+const PORT = process.env.PORT || process.env.CALLBACK_PORT || 3000;
 
 if (!BOT_TOKEN || !MONGO_URI || !VIOLET_API_KEY || !VIOLET_SECRET_KEY) {
     console.error("❌ ERROR: Pastikan BOT_TOKEN, MONGO_URI, VIOLET_API_KEY, dan VIOLET_SECRET_KEY terisi di .env");
