@@ -8,9 +8,9 @@ const { Telegraf } = require('telegraf');
 require('dotenv').config();
 
 // --- Import Models (Pastikan jalur sesuai jika server terpisah) ---
-const User = require('./User'); 
-const Product = require('./Product'); 
-const Transaction = require('./Transaction'); 
+const User = require('./models/User'); 
+const Product = require('./models/Product'); 
+const Transaction = require('./models/Transaction'); 
 
 // --- Konfigurasi dari .env ---
 const BOT_TOKEN = process.env.BOT_TOKEN;
