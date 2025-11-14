@@ -1,50 +1,58 @@
-const express = require("express");
-const crypto = require("crypto");
-const mongoose = require("mongoose");
-const { Telegraf } = require("telegraf"); 
-const bodyParser = require("body-parser");
-const fetch = require('node-fetch');
-require("dotenv").config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const crypto = require('crypto');
+const mongoose = require('mongoose');
+const { Telegraf } = require('telegraf'); 
+const { URLSearchParams } = require('url');
+
+require('dotenv').config();
 
 // --- Import Models ---
+// Pastikan path ini sesuai dengan struktur folder Anda: ./models/*.js
 const User = require('./models/User'); 
 const Product = require('./models/Product'); 
 const Transaction = require('./models/Transaction'); 
 
-const app = express();
-const PORT = process.env.PAYMENT_CALLBACK_PORT || 37763; 
+// --- Konfigurasi dari .env ---
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MONGO_URI = process.env.MONGO_URI;
+const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
+const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
+// Gunakan process.env.PORT untuk Heroku, atau fallback ke 3001
+const PORT = process.env.PORT || process.env.CALLBACK_PORT || 3001; 
 
-app.use(bodyParser.urlencoded({ extended: true })); 
+if (!BOT_TOKEN || !MONGO_URI || !VIOLET_API_KEY || !VIOLET_SECRET_KEY) {
+    console.error("❌ ERROR: Pastikan BOT_TOKEN, MONGO_URI, VIOLET_API_KEY, dan VIOLET_SECRET_KEY terisi di .env");
+    process.exit(1);
+}
+
+// --- Inisialisasi Bot (Hanya untuk mengirim notifikasi) ---
+const bot = new Telegraf(BOT_TOKEN);
+
+// --- Koneksi MongoDB ---
+mongoose.connect(MONGO_URI)
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => {
+      console.error("❌ MongoDB Error:", err);
+      process.exit(1); 
+  });
+
+// --- Inisialisasi Express App ---
+const app = express();
+// Gunakan raw body parser untuk /webhook/violetpay
+app.use('/webhook/violetpay', bodyParser.raw({ type: 'application/x-www-form-urlencoded' }));
 app.use(bodyParser.json()); 
 
-// --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
-const MONGO_URI = process.env.MONGO_URI;
 
-// ====== KONEKSI DATABASE ======
-mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ Payment Callback Server: MongoDB Connected"))
-  .catch(err => console.error("❌ Payment Callback Server: MongoDB Error:", err));
+// ====================================================
+// ====== UTILITY FUNCTIONS (Delivery Logic) ======
+// ====================================================
 
-// Inisialisasi Bot untuk mengirim notifikasi
-const bot = new Telegraf(BOT_TOKEN); 
-
-// === SCHEMA BARU (menggunakan model yang diimpor) ===
-const TransactionNew = Transaction; 
-
-// ====== HELPER FUNCTIONS (Delivery & Processing) ======
-
-// Fungsi untuk mengirim produk
 async function deliverProduct(userId, productId) {
-    try {
-        const product = await Product.findById(productId);
-        if (!product || product.kontenProduk.length <= 0) {
-            bot.telegram.sendMessage(userId, '⚠️ Produk yang Anda beli kehabisan stok setelah pembayaran. Silakan hubungi admin.', { parse_mode: 'Markdown' });
-            return false;
-        }
-
-        const key = product.kontenProduk.shift();
+    const product = await Product.findById(productId);
+    
+    if (product && product.kontenProduk.length > 0) {
+        const deliveredContent = product.kontenProduk.shift(); 
         
         await Product.updateOne({ _id: productId }, { 
             $set: { kontenProduk: product.kontenProduk }, 
@@ -52,183 +60,129 @@ async function deliverProduct(userId, productId) {
         });
         
         bot.telegram.sendMessage(userId, 
-            `🎉 **Pembayaran Sukses! Produk Telah Dikirim!**\n\n` +
+            `🎉 **Produk Telah Dikirim!**\n\n` +
             `**Produk:** ${product.namaProduk}\n` +
-            `**Konten Anda:**\n\`${key}\``, 
+            `**Konten Anda:**\n\`${deliveredContent}\``, 
             { parse_mode: 'Markdown' }
-        );
+        ).catch(e => console.error(`Gagal kirim konten ke user ${userId}:`, e.message));
+        
         return true;
-    } catch (error) {
-        console.error(`❌ Gagal deliver produk ke user ${userId} di callback:`, error);
-        bot.telegram.sendMessage(userId, '❌ Terjadi kesalahan saat mengirim produk Anda. Silakan hubungi admin.', { parse_mode: 'Markdown' });
+    } else {
+        bot.telegram.sendMessage(userId, `⚠️ **Pembelian Berhasil**, namun stok konten habis. Hubungi Admin.`);
         return false;
     }
 }
 
 
-// FUNGSI INTI UNTUK MEMPROSES CALLBACK TRANSAKSI BARU (PROD/TOPUP)
-async function processNewBotTransaction(refId, data) {
-    try {
-        const status = data.status.toLowerCase(); 
-        
-        // Logika fleksibel mencari nominal dari berbagai key
-        const nominalKeys = ['total', 'nominal', 'jumlah', 'amount', 'total_amount', 'paid_amount', 'refNominal', 'harga_bayar'];
-        
-        let totalBayarCallback = 0;
-        
-        for (const key of nominalKeys) {
-            if (data[key] !== undefined && data[key] !== null && String(data[key]).trim() !== "") {
-                const parsedValue = parseFloat(data[key]);
-                if (parsedValue > 0) {
-                    totalBayarCallback = parsedValue;
-                    console.log(`✅ [PAYMENT BOT] Nominal ditemukan di key: ${key} dengan nilai: ${totalBayarCallback}`);
-                    break;
-                }
-            }
-        }
-        
-        console.log(`--- Nominal Callback Final: ${totalBayarCallback} ---`);
-        
-        const transaction = await TransactionNew.findOne({ refId: refId });
+// ====================================================
+// ====== VMP CALLBACK ENDPOINT (POST) ================
+// ====================================================
 
-        if (!transaction) {
-            console.log(`❌ [PAYMENT BOT] Gagal: Transaksi ${refId} TIDAK DITEMUKAN.`);
-            return;
-        }
+app.post('/webhook/violetpay', async (req, res) => {
+    
+    const bodyString = req.body.toString('utf8');
+    const callbackData = Object.fromEntries(new URLSearchParams(bodyString));
 
-        if (transaction.status === 'SUCCESS') {
-            console.log(`⚠️ [PAYMENT BOT] Transaksi ${refId} sudah SUCCESS. Abaikan.`);
-            return;
-        }
+    console.log('[VMP CALLBACK RECEIVED]', callbackData);
 
-        const userId = transaction.userId;
-        const itemType = transaction.produkInfo.type;
+    const refId = callbackData.ref_kode;
+    const vmpStatus = callbackData.status;
+    const incomingSignature = callbackData.signature;
 
-        if (status === 'success') {
-            
-            // 2. Pastikan jumlah pembayaran sesuai
-            if (totalBayarCallback !== transaction.totalBayar) {
-                console.log(`⚠️ [PAYMENT BOT] Jumlah pembayaran TIDAK SESUAI. DB: ${transaction.totalBayar}, Callback: ${totalBayarCallback}.`);
-                await TransactionNew.updateOne({ refId }, { status: 'FAILED' });
-                bot.telegram.sendMessage(userId, `❌ **Pembayaran Gagal:** Nominal tidak sesuai (DB: ${transaction.totalBayar}, Callback: ${totalBayarCallback}). Hubungi Admin. (Ref: ${refId}).`, { parse_mode: 'Markdown' });
-                return;
-            }
-
-            // 3. Update Status ke SUCCESS
-            const updateResult = await TransactionNew.updateOne({ refId, status: 'PENDING' }, { status: 'SUCCESS' });
-
-            if (updateResult.modifiedCount > 0) {
-                console.log(`✅ [PAYMENT BOT] Status Transaksi ${refId} berhasil diupdate ke SUCCESS.`);
-                
-                // 4. Lakukan Delivery Produk/Top Up
-                const user = await User.findOne({ userId }); 
-                if (!user) return console.error(`❌ [PAYMENT BOT] User ${userId} tidak ditemukan untuk delivery.`);
-
-                if (itemType === 'TOPUP') {
-                    user.saldo += transaction.totalBayar;
-                    user.totalTransaksi += 1;
-                    await user.save();
-                    
-                    bot.telegram.sendMessage(userId, 
-                        `🎉 **Top Up Berhasil!**\nSaldo kini: Rp ${user.saldo.toLocaleString('id-ID')}.`, 
-                        { parse_mode: 'Markdown' }
-                    );
-                    
-                } else if (itemType === 'PRODUCT') {
-                    const productData = await Product.findOne({ namaProduk: transaction.produkInfo.namaProduk }).select('_id');
-                    if (productData) {
-                        await deliverProduct(userId, productData._id); 
-                    } else {
-                        bot.telegram.sendMessage(userId, `⚠️ Produk ${transaction.produkInfo.namaProduk} tidak ditemukan saat delivery. Hubungi admin.`, { parse_mode: 'Markdown' });
-                    }
-                }
-            } 
-
-        } else if (status === 'failed' || status === 'expired') {
-            await TransactionNew.updateOne({ refId, status: 'PENDING' }, { status: status.toUpperCase() });
-            bot.telegram.sendMessage(userId, `❌ **Transaksi Gagal/Dibatalkan:** Pembayaran Anda berstatus **${status.toUpperCase()}**.`, { parse_mode: 'Markdown' });
-        }
-
-    } catch (error) {
-        console.error(`❌ [CALLBACK ERROR] Gagal memproses transaksi ${refId}:`, error);
+    // 1. Validasi Awal, Cari Transaksi, dan Cek Status
+    if (!refId || !vmpStatus || !incomingSignature) {
+        return res.status(400).send('Missing essential data'); 
     }
-}
-
-// FUNGSI UTAMA UNTUK VERIFIKASI SIGNATURE
-function verifySignature(refid, data) {
-    const calculatedSignature = crypto.createHash('md5').update(process.env.VIOLET_SECRET_KEY + refid).digest('hex'); 
-    const incomingSignature = data.signature;
-
-    const isSignatureValid = (incomingSignature === calculatedSignature);
-    const shouldBypassSignature = !incomingSignature || incomingSignature.length < 5; 
-
-    if (!isSignatureValid && !shouldBypassSignature) {
-        console.log(`🚫 Signature callback TIDAK VALID! Dikirim: ${incomingSignature}, Hitungan: ${calculatedSignature}`);
-        return false;
+    
+    const transaction = await Transaction.findOne({ refId: refId });
+    
+    if (!transaction) {
+        console.warn(`⚠️ [VMP WARN] Transaksi tidak ditemukan: ${refId}.`);
+        return res.status(200).send('Transaction not found');
     }
-    return true;
-}
+    
+    if (transaction.status === 'SUCCESS') {
+        console.log(`ℹ️ [VMP INFO] Transaksi sudah diproses: ${refId}.`);
+        return res.status(200).send('Transaction already processed');
+    }
 
+    // 2. Verifikasi Signature VMP (Kunci: Menggunakan Nominal dari DB!)
+    const nominalDB = transaction.totalBayar; // Ambil nominal yang terpercaya dari DB
+    
+    // Formula Signature: refId + API_KEY + nominalDB
+    const mySignatureString = refId + VIOLET_API_KEY + nominalDB;
+    const calculatedSignature = crypto
+        .createHmac("sha256", VIOLET_SECRET_KEY)
+        .update(mySignatureString)
+        .digest("hex");
 
-// ====== ENDPOINT UTAMA KHUSUS PAYMENT ======
-app.post("/payment_callback", async (req, res) => {
+    if (calculatedSignature !== incomingSignature) {
+        // Jika signature tidak cocok, asumsikan callback palsu atau data rusak
+        console.warn(`❌ [VMP WARN] Signature tidak cocok untuk Ref ID: ${refId}. Ditolak. (Nominal Cek: ${nominalDB})`);
+        return res.status(200).send('Signature Mismatch but OK to stop retry'); 
+    }
     
-    const data = req.body; 
-    
-    // ==========================================================
-    // >>> LANGKAH DEBUGGING EKSTERNAL (HAPUS SETELAH SELESAI) <<<
-    const EXTERNAL_LOGGING_URL = 'URL_LOGGING_EKSTERNAL_ANDA_DI_SINI'; 
-    
-    if (EXTERNAL_LOGGING_URL.startsWith('http')) {
+    // 3. Proses Status SUCCESS (Hanya jika Signature Valid)
+    if (vmpStatus === 'SUCCESS') {
         try {
-            fetch(EXTERNAL_LOGGING_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            }).catch(e => console.error('Failed to log externally:', e));
-        } catch (e) {
-             // Abaikan error di sini
+            // A. Update status transaksi
+            await Transaction.updateOne({ refId: refId }, { status: 'SUCCESS' });
+            
+            // B. Ambil User
+            const userId = transaction.userId;
+            
+            // C. Lakukan Delivery (Produk atau Saldo)
+            if (transaction.produkInfo.type === 'TOPUP') {
+                await User.updateOne({ userId }, { $inc: { saldo: nominalDB, totalTransaksi: 1 } });
+                const updatedUser = await User.findOne({ userId });
+                
+                bot.telegram.sendMessage(userId, 
+                    `🎉 **Top Up Saldo Berhasil!**\n` +
+                    `Saldo Anda bertambah **Rp ${nominalDB.toLocaleString('id-ID')}**.\n` +
+                    `Saldo kini: Rp ${updatedUser.saldo.toLocaleString('id-ID')}.`, 
+                    { parse_mode: 'Markdown' }
+                );
+                
+            } else if (transaction.produkInfo.type === 'PRODUCT') {
+                const product = await Product.findOne({ namaProduk: transaction.produkInfo.namaProduk });
+                if (product) {
+                    await deliverProduct(userId, product._id); 
+                    await User.updateOne({ userId }, { $inc: { totalTransaksi: 1 } });
+                }
+            }
+            
+            console.log(`✅ Transaksi ${refId} (${transaction.produkInfo.type}) berhasil diproses dan dikirim.`);
+            
+        } catch (error) {
+            console.error(`❌ [VMP ERROR] Gagal memproses transaksi ${refId}:`, error);
+            return res.status(200).send('Internal Server Error'); 
+        }
+        
+    } else if (vmpStatus === 'FAILED' || vmpStatus === 'EXPIRED') {
+        // Logika untuk gagal/expired
+        try {
+             if (transaction.status === 'PENDING') {
+                await Transaction.updateOne({ refId: refId }, { status: vmpStatus });
+                bot.telegram.sendMessage(transaction.userId, `⚠️ **Transaksi Dibatalkan/Gagal**\n\nTransaksi ID \`${refId}\` dengan total **Rp ${nominalDB.toLocaleString('id-ID')}** berstatus: **${vmpStatus}**.`, { parse_mode: 'Markdown' });
+             }
+        } catch (error) {
+            console.error(`[VMP ERROR] Gagal update status ${vmpStatus} untuk ${refId}:`, error);
         }
     }
-    // ==========================================================
     
-    const refid = data.ref_id || data.ref_kode || data.ref; 
-    
-    console.log(`\n--- CALLBACK DITERIMA (PAYMENT BOT) ---`);
-    console.log("RAW CALLBACK DATA:", data);
-    console.log(`Ref ID: ${refid}, Status: ${data.status}`);
+    res.status(200).send('OK'); 
+});
 
-    if (!verifySignature(refid, data)) {
-        return res.status(200).send({ status: false, message: "Invalid signature ignored" });
-    }
-    
-    try {
-        if (!refid || (!refid.startsWith('PROD-') && !refid.startsWith('TOPUP-'))) {
-            console.error("❌ Callback Payment: Missing or incorrect Ref ID format.");
-            return res.status(400).send({ status: false, message: "Missing or invalid reference ID" }); 
-        }
-
-        await processNewBotTransaction(refid, data);
-        
-        res.status(200).send({ status: true, message: "Callback received and processed" }); 
-        
-    } catch (error) {
-        console.error("❌ Payment Callback Error:", error);
-        res.status(200).send({ status: false, message: "Internal server error during processing" });
-    }
+// HANYA endpoint dummy untuk success redirect dari VMP
+app.get('/success', (req, res) => {
+    res.send('Pembayaran berhasil! Silakan cek bot Telegram Anda.');
 });
 
 
-// ====== SERVER LAUNCH ======
-mongoose.connect(MONGO_URI)
-  .then(() => {
-    console.log("✅ Payment Callback Server: MongoDB Connected");
-    
-    app.listen(PORT, () => {
-        console.log(`🚀 Payment Callback server berjalan di port ${PORT}`);
-    });
-  })
-  .catch(err => {
-      console.error("❌ Payment Callback Server: MongoDB Error:", err);
-      process.exit(1); 
-  });
+// ====================================================
+// ====== SERVER LAUNCH (Diperbaiki untuk Heroku) =====
+// ====================================================
+
+app.listen(PORT, () => {
+    console.log(`🚀 VMP Callback Server berjalan di port ${PORT}`);
+});
