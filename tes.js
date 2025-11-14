@@ -184,5 +184,5 @@ app.get('/success', (req, res) => {
 // ====================================================
 
 app.listen(PORT, () => {
-    console.log(`🚀 VMP Callback Server berjalan di port ${PORT}`);
+    console.log(`🚀 VMP ini code tes bang Server berjalan di port ${PORT}`);
 });
